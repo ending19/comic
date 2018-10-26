@@ -8,12 +8,15 @@ Created on Fri Oct 19 16:07:52 2018
 
 import requests
 import random
+import re
 from os import path
 from lxml import etree
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
-from datetime import datetime
+from simulation import web_1kkk_limit
 
+
+# 浏览器标识头
 Agents = [
     "Mozilla/5.0 (Windows NT 6.1; rv:2.0b7pre) Gecko/20100921 Firefox/4.0b7pre",
     "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:2.0b7) Gecko/20101111 Firefox/4.0b7",
@@ -36,25 +39,27 @@ Agents = [
     "Mozilla/5.0 (Windows NT 6.1; rv:2.0b10pre) Gecko/20110113 Firefox/4.0b10pre",
     "Mozilla/5.0 (X11; Linux i686; rv:2.0b10) Gecko/20100101 Firefox/4.0b10",
 ]
+# 代理池
+ProxyPool = ['118.25.89.245:8080', ]
+# 用于获取1kkk网站的漫画章节索引的正则表达式
+re_1kkk_chapt = re.compile(r'/ch(\d+).*-')
 
-ProxyPool = ['118.25.89.245:8080', '118.190.95.35:9001',]
 
-
-
+# 用于获取HTML网页
 def gethtml(url, headers=None, cookies=None, host=None):
-    host = host or urlparse(url).netloc
+    host = host or urlparse(url).netloc             # 获取网址的host信息
     if not headers:
         headers = {'User-Agent': random.choice(Agents), 'Host': host}
-    #proxies = {'http': random.choice(ProxyPool)}
-    proxies = None
+    proxies = {'http': random.choice(ProxyPool)}
+    #proxies = None                                  # 此处不使用代理
     res = requests.get(url, headers= headers, cookies=cookies, proxies=proxies)
     res.raise_for_status()
-    if res.encoding == 'ISO-8859-1':
+    if res.encoding == 'ISO-8859-1':                # 网页编码处理
         res.encoding = requests.utils.get_encodings_from_content(res.text)[0]
     return res, host
 
 
-
+# 对1kkk网站的漫画信息的解析
 def _parse_1kkk_index(html):
     root = etree.HTML(html)
     names = root.xpath("//li[not(@class)]/div/div[@class='mh-item-detali']/h2/a/text()")
@@ -76,39 +81,44 @@ def _parse_1kkk_index(html):
         raise IndexError("Data length is not aligned.")
 
 
-#def _parse_1kkk_chapt(html):
-#    root = etree.HTML(html)
-#    chapt_urls = root.xpath('//div[@id="chapterlistload"]/ul//li/a/@href')
-#    if chapt_urls == []:
-#        return None, None, None
-#    chapt_names = root.xpath('//div[@class="info"]/p[@class="title "]/text()')
-#    chapt_index = list(range(1,len(chapt_urls)+1))
-#    chapts = zip(chapt_index, chapt_names, chapt_urls)
-#    chapt_pay = root.xpath('//div[@class="info"]/span[@class="detail-lock"]')
-#    #try:
-#    #    date = root.xpath('//div[@id="chapterlistload"]/ul//li[last()]//p[@class="tip"]/text()')[-1]
-#    #    chapt_modify = datetime.strptime(date,"%Y-%m-%d")
-#    #except:
-#    #    print("time error")
-#    #    return None,None,None
-#    free_num = len(chapt_urls) - len(chapt_pay)
-#    #return list(chapts), free_num, chapt_modify
-#    return list(chapts), free_num
-
-
-def _parse_1kkk_chapt(html):
-    root = etree.HTML(html)
+# 对1kkk网站的正常的漫画章节的解析
+def _1kkk_chapt_normal(root):
     chapt_urls = root.xpath('//div[@id="chapterlistload"]/ul//li/a/@href')
-    lenth = len(chapt_urls)
     nameflag = root.xpath('//div[@id="chapterlistload"]/ul//li/a/div[@class="cover"]')
-    if len(nameflag)==lenth:
+    if nameflag:                        # 针对不同的网页类型
         chapt_names = root.xpath('//div[@class="info"]/p[@class="title "]/text()')
     else:
         chapt_names = root.xpath('//div[@id="chapterlistload"]/ul//li/a/text()')
     chapt_names = [name.strip() for name in chapt_names if name.strip() !='']
-    lenth = len(chapt_urls)
+    chapt_pay = root.xpath('//span[@class="detail-lock"]')
+    chapt_discount = root.xpath('//div[@id="chapterlistload"]/ul//span[@class="view-discount-red"]')
+    order = root.xpath('//span[@class="s"]/a[@class="order "]/text()')
+    order = order[0].strip()=='正序' if order else False
+    return chapt_urls, chapt_names, len(chapt_pay)+len(chapt_discount), order
+    
+
+# 对1kkk网站的某些限制级漫画进行解析，使用模拟浏览器，加载JavaScript  
+def _1kkk_chapt_limit(url):
+    html = web_1kkk_limit(url)
+    root = etree.HTML(html)
+    return _1kkk_chapt_normal(root)
+
+
+# 对1kkk的漫画章节进行解析
+def _parse_1kkk_chapt(html, url):
+    root = etree.HTML(html)
+    chapt_warning = root.xpath('//div[@class="warning-bar"]')
+    if not chapt_warning:
+        chapt_urls, chapt_names, chapt_pay, order =  _1kkk_chapt_normal(root)
+    elif root.xpath('//div[@class="warning-bar"]/a'):
+        chapt_urls, chapt_names, chapt_pay, order =  _1kkk_chapt_limit(url)
+    else:                                       # 由于政策原因，该漫画被屏蔽了
+        print('lost')
+        return None, True
+    lenth =len(chapt_urls)
     if lenth == len(chapt_names):
-        chapt_urls = [str(url) for url in chapt_urls]
+        chapt_urls = [str(curl) for curl in chapt_urls]
+        # 对漫画章节类型进行分类，主线还是番外
         chapt_type = []
         for i,v in enumerate(chapt_urls):
             if v[:3]=='/ch':
@@ -117,20 +127,25 @@ def _parse_1kkk_chapt(html):
                 chapt_type.append('other')
             else:
                 chapt_type.append(None)
-        try:
-            chapt_index = [int(url.split('-')[0][3:]) if chapt_type[i]=='ch' else None for i,url in enumerate(chapt_urls)] 
+        # 为漫画章节添加索引
+        last_url = chapt_urls[-1] if order else chapt_urls[0]
+        if set(chapt_type)=={'ch'} and lenth==int(re_1kkk_chapt.search(last_url).group(1)):
+            chapt_index = range(1,lenth+1) if order else range(lenth,0,-1)
+        else:
+            indexs = [re_1kkk_chapt.search(curl) for curl in chapt_urls]
+            chapt_index = [int(index.group(1)) if index else None for index in indexs]
+        # 将章节信息打包并返回
+        try:    
             chapts = zip(chapt_index, chapt_names, chapt_urls, chapt_type)
-            chapt_pay = root.xpath('//span[@class="detail-lock"]')
-            free_num = lenth - len(chapt_pay)
+            free_num = lenth - chapt_pay
             return list(chapts), free_num
         except:
-            print('parse error')
-            return None, None
+            return None, False
     else:
-        print('error')
-        return None, None
+        return None, False
 
 
+# 解析漫画信息
 def parseindex(url, headers=None, cookies=None, host=None):
     res, host = gethtml(url, headers=headers, cookies=cookies, host=host)
     if host == 'www.1kkk.com':
@@ -138,14 +153,15 @@ def parseindex(url, headers=None, cookies=None, host=None):
     return _parseindex(res.text), host
 
 
+# 解析章节信息
 def parsechapt(url, headers=None, cookies=None, host=None):
     res, host = gethtml(url, headers=headers, cookies=cookies, host=host)
     if host == 'www.1kkk.com':
         _parsechapt = _parse_1kkk_chapt
-    return _parsechapt(res.text)
+    return _parsechapt(res.text, url)
 
 
-
+# 用于HTML测试
 def htmltest(url, web=False, headers=None, cookies=None, host=None):
     if not path.exists('test.html') or web:
         res, host = gethtml(url, headers=headers, cookies=cookies, host=host)
@@ -157,13 +173,15 @@ def htmltest(url, web=False, headers=None, cookies=None, host=None):
         with open('test.html','r') as f:
             html = f.read()
     root = etree.HTML(html)
-    return root, soup
+    return root, soup, html
+
 
 
 if __name__ == '__main__':
     URL = "http://www.1kkk.com/manhua369/"
-    root, soup = htmltest(URL,web=True)
-
+    root, soup, html = htmltest(URL,web=True)
+    #chapt_urls, chapt_names, chapt_pay = _1kkk_chapt_normal(root)
+    chapts, free = _parse_1kkk_chapt(html,URL)
 
 
 
